@@ -1,0 +1,654 @@
+     1                                  %define SECTORS 16                          ; keep it under 18
+     2                                  %define IMAGE_SIZE ((SECTORS + 1) * 512)    ; SECTORS + 1 (~= 18) * 512 bytes
+     3                                  %define STACK_SIZE 256                      ; 4096 bytes in paragraphs
+     4                                  
+     5                                  bits 16                                     ; 16 bit mode
+     6                                  ;org 0x7C00                                 ; BIOS boot sector entry point
+     7                                  
+     8                                  start:
+     9 00000000 FA                          cli ; disable interrupts
+    10                                  
+    11                                      ;
+    12                                      ; Notes:
+    13                                      ;  1 paragraph  = 16 bytes
+    14                                      ; 32 paragraphs = 512 bytes
+    15                                      ;
+    16                                      ; Skip past our SECTORS
+    17                                      ; Skip past our reserved video memory buffer (for double buffering)
+    18                                      ; Skip past allocated STACK_SIZE
+    19                                      ;
+    20 00000001 B8C012                      mov ax, (((SECTORS + 1) * 32) + 4000 + STACK_SIZE)
+    21 00000004 8ED0                        mov ss, ax
+    22 00000006 BC0010                      mov sp, STACK_SIZE * 16 ; 4096 in bytes
+    23                                  
+    24 00000009 FB                          sti ; enable interrupts
+    25                                  
+    26 0000000A B8C007                      mov ax, 07C0h           ; point all segments to _start
+    27 0000000D 8ED8                        mov ds, ax
+    28 0000000F 8EC0                        mov es, ax
+    29 00000011 8EE0                        mov fs, ax
+    30 00000013 8EE8                        mov gs, ax
+    31                                  
+    32                                      ; dl contains the drive number
+    33                                  
+    34 00000015 B80000                      mov ax, 0               ; reset disk function
+    35 00000018 CD13                        int 13h                 ; call BIOS interrupt
+    36 0000001A 7223                        jc disk_reset_error
+    37                                  
+    38                                      ; FIXME: if SECTORS + 1 > 18 (~= max sectors per track)
+    39                                      ; then we should try to do _multiple_ reads
+    40                                      ;
+    41                                      ; Notes:
+    42                                      ;
+    43                                      ; 1 sector          = 512 bytes
+    44                                      ; 1 cylinder/track  = 18 sectors
+    45                                      ; 1 side            = 80 cylinders/tracks
+    46                                      ; 1 disk (1'44 MB)  = 2 sides
+    47                                      ;
+    48                                      ; 2 * 80 * 18 * 512 = 1474560 bytes = 1440 kilo bytes = 1.4 mega bytes
+    49                                      ;
+    50                                      ; We start _reading_ at SECTOR 2 because SECTOR 1 is where our stage 1
+    51                                      ; _bootloader_ (this piece of code up until the dw 0xAA55 marker, if you
+    52                                      ; take the time and scroll down below) is *loaded* automatically by BIOS
+    53                                      ; and therefore there is no need to read it again ...
+    54                                  
+    55 0000001C 06                          push es             ; save es
+    56                                  
+    57 0000001D B8E007                      mov ax, 07E0h       ; destination location (address of _start)
+    58 00000020 8EC0                        mov es, ax          ; destination location
+    59 00000022 BB0000                      mov bx, 0           ; index 0
+    60                                  
+    61 00000025 B402                        mov ah, 2           ; read sectors function
+    62 00000027 B010                        mov al, SECTORS     ; number of sectors
+    63 00000029 B500                        mov ch, 0           ; cylinder number
+    64 0000002B B600                        mov dh, 0           ; head number
+    65 0000002D B102                        mov cl, 2           ; starting sector number
+    66 0000002F CD13                        int 13h             ; call BIOS interrupt
+    67                                  
+    68 00000031 7211                        jc disk_read_error
+    69                                  
+    70 00000033 07                          pop es              ; restore es
+    71                                  
+    72 00000034 BE[8900]                    mov si, boot_msg    ; boot message
+    73 00000037 E81A00                      call _puts          ; print
+    74                                  
+    75 0000003A EA0000E007                  jmp 07E0h:0000h     ; jump to _start (a.k.a stage 2)
+    76                                  
+    77                                  disk_reset_error:
+    78 0000003F BE[6000]                    mov si, disk_reset_error_msg
+    79 00000042 EB03                        jmp fatal
+    80                                  
+    81                                  disk_read_error:
+    82 00000044 BE[7500]                    mov si, disk_read_error_msg
+    83                                  
+    84                                  fatal:
+    85 00000047 E80A00                      call _puts  ; print message in [DS:SI]
+    86                                  
+    87 0000004A B80000                      mov ax, 0   ; wait for a keypress
+    88 0000004D CD16                        int 16h
+    89                                  
+    90 0000004F B80000                      mov ax, 0   ; reboot
+    91 00000052 CD19                        int 19h
+    92                                  
+    93                                  ; ===========================================
+    94                                  ; PROTOTYPE : void _puts(char *s)
+    95                                  ; INPUT     : offset/pointer to string in SI
+    96                                  ; RETURN    : n/a
+    97                                  ; ===========================================
+    98                                  _puts:
+    99 00000054 AC                          lodsb       ; move byte [DS:SI] into AL
+   100                                  
+   101 00000055 3C00                        cmp al, 0   ; 0 == end of string ?
+   102 00000057 7406                        je .end
+   103                                  
+   104 00000059 B40E                        mov ah, 0Eh ; display character function
+   105 0000005B CD10                        int 10h     ; call BIOS interrupt
+   106                                  
+   107 0000005D EBF5                        jmp _puts   ; next character
+   108                                  
+   109                                  .end:
+   110 0000005F C3                          ret
+   111                                  
+   112 00000060 436F756C64206E6F74-     disk_reset_error_msg: db 'Could not reset disk', 0
+   113 00000069 207265736574206469-
+   114 00000072 736B00             
+   115 00000075 436F756C64206E6F74-     disk_read_error_msg: db 'Could not read disk', 0
+   116 0000007E 207265616420646973-
+   117 00000087 6B00               
+   118 00000089 426F6F74696E672046-     boot_msg: db 'Booting Floppy Bird ... ', 0
+   119 00000092 6C6F70707920426972-
+   120 0000009B 64202E2E2E2000     
+   121                                  
+   122 000000A2 00<rept>                times 510 - ($ - $$) db 0   ; pad to 510 bytes
+   123 000001FE 55AA                    dw 0xAA55                   ; pad 2 more bytes = 512 bytes = THE BOOT SECTOR
+   124                                  
+   125                                  ; entry point
+   126                                  _start:
+   127 00000200 E81200                      call main               ; call main
+   128 00000203 EBFE                        jmp $                   ; loop forever
+   129                                  
+   130 00000205 48656C6C6F204A6163-     msg:       db "Hello Jacob."
+   131 0000020E 6F622E             
+   132 00000211 00                                 db 0
+   133 00000212 FF00                    countdown: dw 255
+   134 00000214 32                      inc_amt:   db 50
+   135                                  
+   136                                  main:
+   137 00000215 B80300                      mov ax, 0x3     ; 80x25 @ 16 color mode
+   138 00000218 CD10                        int 10h         ; call BIOS interrupt
+   139                                  
+   140 0000021A BE[0502]                    mov si, msg
+   141 0000021D E82300                      call puts
+   142                                  
+   143 00000220 E82E00                      call set_vga_mode ; 320x200 @ 256 color mode
+   144                                  .loop:
+   145 00000223 6A1E                        push 30         ; x
+   146 00000225 6A1E                        push 30         ; y
+   147 00000227 6A32                        push 50          ; w
+   148 00000229 6A32                        push 50          ; h
+   149 0000022B 8B1E[1402]                  mov bx, [inc_amt]
+   150 0000022F 83C319                      add bx, 25
+   151 00000232 53                          push bx        ; rect color
+   152 00000233 891E[1402]                  mov [inc_amt], bx
+   153                                  
+   154 00000237 E89901                      call blit_rect
+   155 0000023A E81C00                      call vsync
+   156 0000023D E8C601                      call flpscr
+   157                                  
+   158 00000240 74E1                        je .loop
+   159                                  
+   160 00000242 C3                          ret
+   161                                  
+   162                                  puts:
+   163 00000243 60                          pusha
+   164                                  
+   165                                  .loop:
+   166 00000244 AC                          lodsb       ; move byte [DS:SI] into AL
+   167                                  
+   168 00000245 3C00                        cmp al, 0   ; 0 == end of string ?
+   169 00000247 7406                        je .end
+   170                                  
+   171 00000249 B40E                        mov ah, 0Eh ; display character function
+   172 0000024B CD10                        int 10h     ; call BIOS interrupt
+   173                                  
+   174 0000024D EBF5                        jmp .loop   ; next character
+   175                                  
+   176                                  .end:
+   177 0000024F 61                          popa
+   178 00000250 C3                          ret
+   179                                  
+   180                                  %define VIDMEW 320        ; video memory width
+   181                                  %define VIDMEH 200        ; video memory height
+   182                                  %define VIDMES 64000      ; video memory size
+   183                                  %define VIDMEM IMAGE_SIZE ; back buffer video memory
+   184                                  %define VIDMED 0xA000     ; system video memory
+   185                                  
+   186                                  ; ==========================================
+   187                                  ; PROTOTYPE : void set_vga_mode(void)
+   188                                  ; INPUT     : n/a
+   189                                  ; RETURN    : n/a
+   190                                  ; ==========================================
+   191                                  set_vga_mode:
+   192 00000251 60                          pusha
+   193                                  
+   194 00000252 B81300                      mov ax, 0x13    ; 320x200 @ 256 color mode
+   195 00000255 CD10                        int 10h         ; call BIOS interrupt
+   196                                  
+   197 00000257 61                          popa
+   198 00000258 C3                          ret
+   199                                  
+   200                                  ; ==========================================
+   201                                  ; PROTOTYPE : void vsync(void)
+   202                                  ; INPUT     : n/a
+   203                                  ; RETURN    : n/a
+   204                                  ; ==========================================
+   205                                  vsync:
+   206 00000259 60                          pusha
+   207 0000025A BADA03                      mov dx, 0x3DA   ; port 0x3DA
+   208                                  
+   209                                  .l1:
+   210 0000025D EC                          in al, dx       ; port
+   211 0000025E A808                        test al, 8      ; test bit 4
+   212 00000260 75FB                        jnz .l1         ; retrace in progress?
+   213                                  
+   214                                  .l2:
+   215 00000262 EC                          in al, dx       ; port
+   216 00000263 A808                        test al, 8      ; test bit 4
+   217 00000265 74FB                        jz .l2          ; new retrace?
+   218                                  
+   219 00000267 61                          popa
+   220 00000268 C3                          ret
+   221                                  
+   222                                  ; =====================================================
+   223                                  ; PROTOTYPE : void blit( unsigned char *pixels,
+   224                                  ;                        short  w, short  h,
+   225                                  ;                        short sx, short sy,
+   226                                  ;                        short sw, short sh,
+   227                                  ;                        short dx, short dy,
+   228                                  ;                        unsigned char color,
+   229                                  ;                        unsigned char tint )
+   230                                  ; INPUT     : n/a
+   231                                  ; RETURN    : n/a
+   232                                  ; =====================================================
+   233                                  blit:
+   234 00000269 55                          push bp
+   235 0000026A 89E5                        mov bp, sp          ; top of the stack
+   236                                  
+   237 0000026C 60                          pusha
+   238                                  
+   239 0000026D 837E0E00                    cmp word [bp+14], 0 ; sw is 0?
+   240 00000271 0F84E700                    je .end
+   241                                  
+   242 00000275 837E0C00                    cmp word [bp+12], 0 ; sh is 0?
+   243 00000279 0F84DF00                    je .end
+   244                                  
+   245 0000027D 817E0A4001                  cmp word [bp+10], VIDMEW ; dx out of bounds on right
+   246 00000282 0F8DD600                    jge .end                 ; full clip
+   247                                  
+   248 00000286 817E08C800                  cmp word [bp+8], VIDMEH ; dy out of bounds on bottom
+   249 0000028B 0F8DCD00                    jge .end                ; full clip
+   250                                  
+   251 0000028F 8B460E                      mov ax, [bp+14]      ;  sw (width)
+   252 00000292 F7D8                        neg ax               ; -sw
+   253                                  
+   254 00000294 39460A                      cmp word [bp+10], ax ; dx out of bounds on left
+   255 00000297 0F8EC100                    jle .end             ; full clip
+   256                                  
+   257 0000029B 8B5E0C                      mov bx, [bp+12]      ; sh (height)
+   258 0000029E F7DB                        neg bx               ; -sh
+   259                                  
+   260 000002A0 395E08                      cmp word [bp+8], bx  ; dy out of bounds on top
+   261 000002A3 0F8EB500                    jle .end             ; full clip
+   262                                  
+   263 000002A7 F7D8                        neg ax               ; revert sw (width)
+   264 000002A9 03460A                      add ax, [bp+10]      ; add dx
+   265                                  
+   266 000002AC F7DB                        neg bx               ; revert sh (height)
+   267 000002AE 035E08                      add bx, [bp+8]       ; add dy
+   268                                  
+   269 000002B1 3D4001                      cmp ax, VIDMEW       ; dx partially out of bounds on right
+   270 000002B4 7D1C                        jge .clipr           ; try partial right clip
+   271                                  
+   272 000002B6 81FBC800                    cmp bx, VIDMEH       ; dy partially ouf of bounds on bottom
+   273 000002BA 7D22                        jge .clipb           ; try partial bottom clip
+   274                                  
+   275 000002BC 837E0A00                    cmp word [bp+10], 0 ; dx partially out of bounds on left
+   276 000002C0 7D25                        jge .clipt          ; quick exit if it's not the case
+   277                                  
+   278                                  .clipl: ; clip left
+   279 000002C2 8B460A                      mov ax, [bp+10]     ; use the dx as an offset
+   280                                  
+   281 000002C5 294612                      sub [bp+18], ax ; offset sx to the right
+   282 000002C8 01460E                      add [bp+14], ax ; offset sw to the left
+   283 000002CB C7460A0000                  mov word [bp+10], 0 ; reset dx
+   284                                  
+   285 000002D0 EB15                        jmp .clipt              ; go and blit the visible part
+   286                                  
+   287                                  .clipr: ; clip right
+   288 000002D2 2D4001                      sub ax, VIDMEW          ; figure out how much is left to display?
+   289 000002D5 29460E                      sub word [bp+14], ax    ; and adjust sw (width)
+   290                                  
+   291 000002D8 81FBC800                    cmp bx, VIDMEH          ; dy partially ouf of bounds on bottom?
+   292 000002DC 7C1D                        jl .noclip              ; quick exit if it's not the case
+   293                                  
+   294                                  .clipb: ; clip bottom
+   295 000002DE 81EBC800                    sub bx, VIDMEH          ; figure out how much is left to display?
+   296 000002E2 295E0C                      sub word [bp+12], bx    ; and adjust sh (height)
+   297                                  
+   298 000002E5 EB14                        jmp .noclip             ; go and blit the visible part
+   299                                  
+   300                                  .clipt: ; clip top
+   301 000002E7 837E0800                    cmp word [bp+8], 0  ; dy partially out of bounds on the top
+   302 000002EB 7D0E                        jge .noclip         ; quick exit if it's not the case
+   303                                  
+   304 000002ED 8B5E08                      mov bx, [bp+8]      ; use the dy as an offset
+   305                                  
+   306 000002F0 295E10                      sub [bp+16], bx ; offset sy to the top
+   307 000002F3 015E0C                      add [bp+12], bx ; offset sh to the bottom
+   308                                  
+   309 000002F6 C746080000                  mov word [bp+8], 0  ; reset dy
+   310                                  
+   311                                  .noclip:
+   312 000002FB B80022                      mov ax, VIDMEM      ; pointer to screen buffer
+   313 000002FE 8EC0                        mov es, ax          ;
+   314                                  
+   315 00000300 B84001                      mov ax, VIDMEW      ; screen width
+   316 00000303 8B5608                      mov dx, [bp+8]      ; dy
+   317 00000306 F7E2                        mul dx
+   318                                  
+   319 00000308 89C7                        mov di, ax          ; dy * screen width
+   320 0000030A 037E0A                      add di, [bp+10]     ; dx
+   321                                  
+   322 0000030D BA4001                      mov dx, VIDMEW      ; screen width
+   323 00000310 2B560E                      sub dx, [bp+14]     ; sw
+   324                                  
+   325 00000313 8916[6303]                  mov [.dxoffset], dx ; destination offset
+   326                                  
+   327 00000317 8B5616                      mov dx, [bp+22]     ; w
+   328 0000031A 2B560E                      sub dx, [bp+14]     ; sw
+   329                                  
+   330 0000031D 8916[6103]                  mov [.sxoffset], dx ; source offset
+   331                                  
+   332 00000321 8B4616                      mov ax, [bp+22]     ; w
+   333 00000324 8B5610                      mov dx, [bp+16]     ; sy
+   334 00000327 F7E2                        mul dx
+   335 00000329 034612                      add ax, [bp+18]     ; sx + sy * w
+   336                                  
+   337 0000032C 8B7618                      mov si, [bp+24]     ; pointer to pixel buffer
+   338 0000032F 01C6                        add si, ax          ; sx + sy * w
+   339                                  
+   340 00000331 31C0                        xor ax, ax          ; clear AX
+   341 00000333 31DB                        xor bx, bx          ; clear BX
+   342 00000335 31C9                        xor cx, cx          ; clear CX
+   343 00000337 31D2                        xor dx, dx          ; clear DX
+   344                                  
+   345                                  .loop:
+   346 00000339 AC                          lodsb                   ; load [DS:SI] into AL
+   347                                  
+   348 0000033A 3A4606                      cmp al, byte [bp+6]     ; compare AL to transparent color
+   349 0000033D 7406                        je .transparent         ; skip this pixel if transparent
+   350                                  
+   351 0000033F 024604                      add al, byte [bp+4]     ; add tint color
+   352                                  
+   353 00000342 AA                          stosb                   ; store AL into [ES:DI]
+   354 00000343 EB01                        jmp .next               ; next pixel
+   355                                  
+   356                                  .transparent:
+   357 00000345 47                          inc di                  ; increment destination offset
+   358                                  
+   359                                  .next:
+   360 00000346 43                          inc bx                  ; increment width
+   361 00000347 3B5E0E                      cmp bx, [bp+14]         ; sw
+   362 0000034A 7CED                        jl .loop                ; end of row?
+   363                                  
+   364 0000034C 31DB                        xor bx, bx              ; reset width
+   365 0000034E 033E[6303]                  add di, [.dxoffset]     ; increment destination offset
+   366 00000352 0336[6103]                  add si, [.sxoffset]     ; increment source offset
+   367                                  
+   368 00000356 41                          inc cx                  ; increment height
+   369 00000357 3B4E0C                      cmp cx, [bp+12]         ; sh
+   370 0000035A 7CDD                        jl .loop                ; next row
+   371                                  
+   372                                  .end:
+   373 0000035C 61                          popa
+   374 0000035D 5D                          pop bp
+   375 0000035E C21600                      ret 22                  ; 11 params * 2 bytes
+   376                                  
+   377 00000361 0000                        .sxoffset: dw 0         ; source X offset
+   378 00000363 0000                        .dxoffset: dw 0         ; destination X offset
+   379                                  
+   380                                  ; =====================================================
+   381                                  ; PROTOTYPE : void blit( unsigned char *pixels,
+   382                                  ;                        short  w, short  h,
+   383                                  ;                        short sx, short sy,
+   384                                  ;                        short sw, short sh,
+   385                                  ;                        short dx, short dy,
+   386                                  ;                        unsigned char color,
+   387                                  ;                        unsigned char tint )
+   388                                  ; INPUT     : n/a
+   389                                  ; RETURN    : n/a
+   390                                  ; =====================================================
+   391                                  blit_fast:
+   392 00000365 55                          push bp
+   393 00000366 89E5                        mov bp, sp          ; top of the stack
+   394                                  
+   395 00000368 60                          pusha
+   396                                  
+   397 00000369 B80022                      mov ax, VIDMEM      ; pointer to screen buffer
+   398 0000036C 8EC0                        mov es, ax          ;
+   399                                  
+   400 0000036E B84001                      mov ax, VIDMEW      ; screen width
+   401 00000371 8B5608                      mov dx, [bp+8]      ; dy
+   402 00000374 F7E2                        mul dx
+   403                                  
+   404 00000376 89C7                        mov di, ax          ; dy * screen width
+   405 00000378 037E0A                      add di, [bp+10]     ; dx
+   406                                  
+   407 0000037B BA4001                      mov dx, VIDMEW      ; screen width
+   408 0000037E 2B560E                      sub dx, [bp+14]     ; sw
+   409                                  
+   410 00000381 8916[D103]                  mov [.dxoffset], dx ; destination offset
+   411                                  
+   412 00000385 8B5616                      mov dx, [bp+22]     ; w
+   413 00000388 2B560E                      sub dx, [bp+14]     ; sw
+   414                                  
+   415 0000038B 8916[CF03]                  mov [.sxoffset], dx ; source offset
+   416                                  
+   417 0000038F 8B4616                      mov ax, [bp+22]     ; w
+   418 00000392 8B5610                      mov dx, [bp+16]     ; sy
+   419 00000395 F7E2                        mul dx
+   420 00000397 034612                      add ax, [bp+18]     ; sx + sy * w
+   421                                  
+   422 0000039A 8B7618                      mov si, [bp+24]     ; pointer to pixel buffer
+   423 0000039D 01C6                        add si, ax          ; sx + sy * w
+   424                                  
+   425 0000039F 31C0                        xor ax, ax          ; clear AX
+   426 000003A1 31DB                        xor bx, bx          ; clear BX
+   427 000003A3 31C9                        xor cx, cx          ; clear CX
+   428 000003A5 31D2                        xor dx, dx          ; clear DX
+   429                                  
+   430                                  .loop:
+   431 000003A7 AC                          lodsb                   ; load [DS:SI] into AL
+   432                                  
+   433 000003A8 3A4606                      cmp al, byte [bp+6]     ; compare AL to transparent color
+   434 000003AB 7406                        je .transparent         ; skip this pixel if transparent
+   435                                  
+   436 000003AD 024604                      add al, byte [bp+4]     ; add tint color
+   437                                  
+   438 000003B0 AA                          stosb                   ; store AL into [ES:DI]
+   439 000003B1 EB01                        jmp .next               ; next pixel
+   440                                  
+   441                                  .transparent:
+   442 000003B3 47                          inc di                  ; increment destination offset
+   443                                  
+   444                                  .next:
+   445 000003B4 43                          inc bx                  ; increment width
+   446 000003B5 3B5E0E                      cmp bx, [bp+14]         ; sw
+   447 000003B8 7CED                        jl .loop                ; end of row?
+   448                                  
+   449 000003BA 31DB                        xor bx, bx              ; reset width
+   450 000003BC 033E[D103]                  add di, [.dxoffset]     ; increment destination offset
+   451 000003C0 0336[CF03]                  add si, [.sxoffset]     ; increment source offset
+   452                                  
+   453 000003C4 41                          inc cx                  ; increment height
+   454 000003C5 3B4E0C                      cmp cx, [bp+12]         ; sh
+   455 000003C8 7CDD                        jl .loop                ; next row
+   456                                  
+   457                                  .end:
+   458 000003CA 61                          popa
+   459 000003CB 5D                          pop bp
+   460 000003CC C21600                      ret 22                  ; 11 params * 2 bytes
+   461                                  
+   462 000003CF 0000                        .sxoffset: dw 0         ; source X offset
+   463 000003D1 0000                        .dxoffset: dw 0         ; destination X offset
+   464                                  
+   465                                  ; ==========================================
+   466                                  ; PROTOTYPE : void blit_rect(short x, short y
+   467                                  ;                            short w, short h,
+   468                                  ;                            unsigned char color)
+   469                                  ; INPUT     : n/a
+   470                                  ; RETURN    : n/a
+   471                                  ; ==========================================
+   472                                  blit_rect:
+   473 000003D3 55                          push bp
+   474 000003D4 89E5                        mov bp, sp          ; top of the stack
+   475                                  
+   476 000003D6 60                          pusha
+   477                                  
+   478 000003D7 B80022                      mov ax, VIDMEM      ; pointer to screen buffer
+   479 000003DA 8EC0                        mov es, ax          ;
+   480                                  
+   481 000003DC B84001                      mov ax, VIDMEW      ; screen width
+   482 000003DF 8B560A                      mov dx, [bp+10]     ; y
+   483 000003E2 F7E2                        mul dx
+   484                                  
+   485 000003E4 89C7                        mov di, ax          ; y * screen width
+   486 000003E6 037E0C                      add di, [bp+12]     ; x
+   487                                  
+   488 000003E9 BA4001                      mov dx, VIDMEW      ; screen width
+   489 000003EC 2B5608                      sub dx, [bp+8]      ; width
+   490                                  
+   491 000003EF 8B5E06                      mov bx, [bp+6]      ; height
+   492                                  
+   493 000003F2 30E4                        xor ah, ah
+   494 000003F4 8A4604                      mov al, byte [bp+4] ; color
+   495                                  
+   496                                  .loop:
+   497 000003F7 8B4E08                      mov cx, [bp+8]      ; width
+   498 000003FA F3AA                        rep stosb           ; draw one row
+   499                                  
+   500 000003FC 01D7                        add di, dx          ; next row
+   501                                  
+   502 000003FE 4B                          dec bx              ; increase row
+   503 000003FF 75F6                        jnz .loop           ; continue unless index 0
+   504                                  
+   505                                  .end:
+   506 00000401 61                          popa
+   507 00000402 5D                          pop bp
+   508 00000403 C20A00                      ret 10              ; 5 params * 2 bytes
+   509                                  
+   510                                  %if 0
+   511                                  ; ==========================================
+   512                                  ; PROTOTYPE : void clrscr(void)
+   513                                  ; INPUT     : clear color in AL
+   514                                  ; RETURN    : n/a
+   515                                  ; ==========================================
+   516                                  clrscr:
+   517                                      push ax
+   518                                      push cx
+   519                                  
+   520                                      mov cx, VIDMEM      ; pointer to screen buffer
+   521                                      mov es, cx          ;
+   522                                      xor di, di          ; index 0
+   523                                  
+   524                                      mov ah, al
+   525                                  
+   526                                      mov cx, VIDMES / 2  ; 64000 / 2
+   527                                      rep stosw           ; store AX (2 bytes) in [ES:DI]
+   528                                  
+   529                                      pop cx
+   530                                      pop ax
+   531                                      ret
+   532                                  %endif
+   533                                  
+   534                                  ; ==========================================
+   535                                  ; PROTOTYPE : void flpscr(void)
+   536                                  ; INPUT     : n/a
+   537                                  ; RETURN    : n/a
+   538                                  ; ==========================================
+   539                                  flpscr:
+   540 00000406 1E                          push ds
+   541 00000407 51                          push cx
+   542                                  
+   543 00000408 B900A0                      mov cx, VIDMED
+   544 0000040B 8EC1                        mov es, cx
+   545 0000040D 31FF                        xor di, di
+   546                                  
+   547 0000040F B90022                      mov cx, VIDMEM
+   548 00000412 8ED9                        mov ds, cx
+   549 00000414 31F6                        xor si, si
+   550                                  
+   551 00000416 B9803E                      mov cx, VIDMES / 4 ; 64000 / 4
+   552                                  
+   553 00000419 F366A5                      rep movsd  ; copy 4 bytes from [DS:SI] into [ES:DI]
+   554                                  
+   555 0000041C 59                          pop cx
+   556 0000041D 1F                          pop ds
+   557 0000041E C3                          ret
+   558                                  
+   559                                  %if 0
+   560                                  ; ==========================================
+   561                                  ; PROTOTYPE : void blit_color_palette(void)
+   562                                  ; INPUT     : n/a
+   563                                  ; RETURN    : n/a
+   564                                  ; ==========================================
+   565                                  blit_color_palette:
+   566                                      pusha
+   567                                  
+   568                                      mov ax, VIDMEM  ; pointer to screen buffer
+   569                                      mov es, ax      ;
+   570                                      xor di, di      ; index 0
+   571                                  
+   572                                      xor ax, ax
+   573                                      mov al, 40      ; start with color 40 to avoid jmp
+   574                                      xor bx, bx
+   575                                  
+   576                                  .loopy1:
+   577                                      sub al, 40      ; substract 40 from the color (see above)
+   578                                  
+   579                                  .loopy2:
+   580                                      xor dx, dx      ; initialize row to index 0
+   581                                  
+   582                                  .loopx:
+   583                                      mov cx, 8       ; initialize counter with 8
+   584                                      rep stosb       ; draw 8 pixels with the current color and increment DI
+   585                                      inc al          ; increment color
+   586                                  
+   587                                      inc dx          ; increment column index
+   588                                      cmp dx, 40      ; start again unless end of row (VIDMEW / 8 = 40)
+   589                                      jl .loopx       ;
+   590                                  
+   591                                      inc ah          ; increment height
+   592                                      cmp ah, 8       ; if we didn't draw 8 pixels, loop again
+   593                                      jl .loopy1      ;
+   594                                  
+   595                                      inc bx          ; increment row index
+   596                                      cmp bx, 25      ; if we reached rows 25 then we are done
+   597                                      je .end         ;
+   598                                  
+   599                                      xor ah, ah      ; reset height
+   600                                      jmp .loopy2     ; start a new row
+   601                                  
+   602                                  .end:
+   603                                      popa
+   604                                      ret
+   605                                  
+   606                                  ; ====================================================
+   607                                  ; PROTOTYPE : void intersect(short r1[4], short r2[4])
+   608                                  ; INPUT     : two vectors (x, y, w, z)
+   609                                  ; RETURN    : carry flag set if intersect
+   610                                  ; ====================================================
+   611                                  intersect:
+   612                                      push bp
+   613                                      mov bp, sp
+   614                                  
+   615                                      pusha
+   616                                  
+   617                                      mov si, [bp+4] ; r1
+   618                                      mov di, [bp+6] ; r2
+   619                                  
+   620                                      mov ax, [di+0] ; x
+   621                                      add ax, [di+4] ; w
+   622                                  
+   623                                      cmp word [si+0], ax ; x1 > x2 + w2
+   624                                      jg .fail
+   625                                  
+   626                                      mov ax, [di+2] ; y
+   627                                      add ax, [di+6] ; h
+   628                                  
+   629                                      cmp word [si+2], ax ; y1 > y2 + h2
+   630                                      jg .fail
+   631                                  
+   632                                      mov ax, [si+0] ; x
+   633                                      add ax, [si+4] ; w
+   634                                  
+   635                                      cmp ax, word [di+0] ; x1 + w1 < x2
+   636                                      jl .fail
+   637                                  
+   638                                      mov ax, [si+2] ; y
+   639                                      add ax, [si+6] ; h
+   640                                  
+   641                                      cmp ax, word [di+2] ; y1 + h1 < y2
+   642                                      jl .fail
+   643                                  
+   644                                      stc
+   645                                      popa
+   646                                      pop bp
+   647                                      ret 4 ; 2 params * 2 bytes
+   648                                  
+   649                                  .fail:
+   650                                      clc
+   651                                      popa
+   652                                      pop bp
+   653                                      ret 4 ; 2 params * 2 bytes
+   654                                  %endif
